@@ -2,7 +2,7 @@
 This is my health data from ring I wear, OURA. It tracks heart rate, metrics in sleep, and an activity score, made up of steps etc)>
 
 ## View Report
-[View the HTML Report](https://rsiddharth54.github.io/OURA_Report/report_complete.html)
+[View the HTML Report](report.html)
 
 
 
