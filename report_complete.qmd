@@ -1,0 +1,903 @@
+---
+---
+title: "Comprehensive Oura Sleep Analysis Report"
+author: "Rishi Siddharth"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    theme: cosmo
+    embed-resources: true
+    fig-width: 12
+    fig-height: 8
+execute:
+  echo: false
+  warning: false
+  message: false
+jupyter: python3
+---
+```{python}
+#| label: setup
+#| include: false
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+from scipy import stats
+from sklearn.linear_model import LinearRegression, Ridge
+from statsmodels.nonparametric.smoothers_lowess import lowess
+from statsmodels.tsa.seasonal import STL
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set up plotting style
+plt.style.use('default')
+sns.set_palette("husl")
+sns.set_context("notebook", font_scale=1.1)
+
+# Load data
+data_path = Path("/Users/rishi/Desktop/OURA/oura_daily_clean.csv")
+df = pd.read_csv(data_path)
+df['day'] = pd.to_datetime(df['day'])
+
+# Calculate sleep stage percentages if not present
+if 'deep_sleep_pct' not in df.columns:
+    df['deep_sleep_pct'] = (df['deep_sleep_mins'] / df['total_sleep_mins']) * 100
+    df['light_sleep_pct'] = (df['light_sleep_mins'] / df['total_sleep_mins']) * 100
+    df['rem_sleep_pct'] = (df['rem_sleep_mins'] / df['total_sleep_mins']) * 100
+
+# Add weekday features
+df['weekday'] = df['day'].dt.day_name()
+df['weekday_num'] = df['day'].dt.dayofweek
+df['is_weekend'] = df['weekday_num'].isin([5, 6])
+
+# ACL event window setup
+ACL_START = pd.Timestamp("2025-06-01")
+ACL_END = pd.Timestamp("2025-07-15")
+df['is_acl_window'] = (df['day'] >= ACL_START) & (df['day'] <= ACL_END)
+
+# ACL phases
+df['acl_phase'] = 'other'
+df.loc[(df['day'] >= ACL_START - pd.Timedelta(days=30)) & (df['day'] < ACL_START), 'acl_phase'] = 'pre'
+df.loc[df['is_acl_window'], 'acl_phase'] = 'during'
+df.loc[(df['day'] > ACL_END) & (df['day'] <= ACL_END + pd.Timedelta(days=30)), 'acl_phase'] = 'post'
+
+# Create lag features for activity metrics
+for col in ['steps', 'active_calories']:
+    df[f'{col}_lag0'] = df[col]
+    df[f'{col}_lag1'] = df[col].shift(1)
+    df[f'{col}_lag2'] = df[col].shift(2)
+
+print(f"Dataset loaded: {df.shape[0]} days from {df['day'].min().strftime('%Y-%m-%d')} to {df['day'].max().strftime('%Y-%m-%d')}")
+```
+
+# Exploratory Data Analysis - Oura Dataset
+
+This notebook provides an initial exploration of the Oura daily dataset, including data quality checks, basic statistics, and preliminary visualizations.
+
+## Data Overview
+```{python}
+#| label: data-overview
+
+print(f"Dataset shape: {df.shape}")
+print(f"Date range: {df['day'].min()} to {df['day'].max()}")
+print(f"Total days: {len(df)}")
+```
+
+## Data Quality Assessment
+```{python}
+#| label: data-quality
+
+print("=== DATA QUALITY ASSESSMENT ===")
+print("\nMissing values by column:")
+missing_data = df.isnull().sum()
+missing_pct = (missing_data / len(df)) * 100
+missing_df = pd.DataFrame({
+    'Missing Count': missing_data,
+    'Missing %': missing_pct
+}).sort_values('Missing Count', ascending=False)
+
+display(missing_df[missing_df['Missing Count'] > 0])
+
+print(f"\nTotal missing values: {df.isnull().sum().sum()}")
+print(f"Complete cases: {df.dropna().shape[0]} / {len(df)} ({df.dropna().shape[0]/len(df)*100:.1f}%)")
+```
+
+## Core Metrics Summary
+```{python}
+#| label: core-metrics
+
+print("=== CORE METRICS SUMMARY ===")
+core_metrics = ['sleep_score', 'readiness_score', 'activity_score', 
+                'total_sleep_mins', 'steps', 'average_hrv']
+
+summary_stats = df[core_metrics].describe()
+display(summary_stats.round(2))
+```
+
+## Sleep Stage Analysis
+```{python}
+#| label: sleep-stages
+
+print("=== SLEEP STAGE ANALYSIS ===")
+sleep_stages = ['deep_sleep_mins', 'light_sleep_mins', 'rem_sleep_mins', 'awake_mins']
+stage_summary = df[sleep_stages + ['total_sleep_mins']].describe()
+display(stage_summary.round(2))
+
+print("\nSleep stage percentages:")
+stage_pct_cols = ['deep_sleep_pct', 'light_sleep_pct', 'rem_sleep_pct']
+stage_pct_summary = df[stage_pct_cols].describe()
+display(stage_pct_summary.round(2))
+```
+
+## Time Series Overview
+```{python}
+#| label: time-series-overview
+#| fig-cap: "Core metrics tracked over time"
+
+fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+
+# Sleep score over time
+axes[0, 0].plot(df['day'], df['sleep_score'], 'b-', alpha=0.7)
+axes[0, 0].set_title('Sleep Score Over Time')
+axes[0, 0].set_ylabel('Sleep Score')
+axes[0, 0].tick_params(axis='x', rotation=45)
+
+# Total sleep over time
+axes[0, 1].plot(df['day'], df['total_sleep_mins'], 'g-', alpha=0.7)
+axes[0, 1].set_title('Total Sleep Duration Over Time')
+axes[0, 1].set_ylabel('Sleep Duration (minutes)')
+axes[0, 1].tick_params(axis='x', rotation=45)
+
+# Steps over time
+axes[1, 0].plot(df['day'], df['steps'], 'r-', alpha=0.7)
+axes[1, 0].set_title('Daily Steps Over Time')
+axes[1, 0].set_ylabel('Steps')
+axes[1, 0].tick_params(axis='x', rotation=45)
+
+# HRV over time
+axes[1, 1].plot(df['day'], df['average_hrv'], 'm-', alpha=0.7)
+axes[1, 1].set_title('Average HRV Over Time')
+axes[1, 1].set_ylabel('HRV (ms)')
+axes[1, 1].tick_params(axis='x', rotation=45)
+
+plt.tight_layout()
+plt.show()
+```
+
+This is interesting. Although heart rate variability and total sleep are pretty similar over time, I have not walked as much since returning to university in DC. In London at LSE I was walking much more, and reached over 20,000 steps a day a fair amount. Also, for heartrate variability there was a huge spike last month. This might have been a glitch with the data or according to google "135 ms is a high value, but its interpretation depends entirely on your individual baseline and other personal factors like age and fitness level."
+
+## Correlation Matrix
+```{python}
+#| label: correlation-matrix
+#| fig-cap: "Correlation matrix of core metrics"
+
+plt.figure(figsize=(10, 8))
+correlation_matrix = df[core_metrics].corr()
+sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0, 
+            square=True, fmt='.2f')
+plt.title('Correlation Matrix of Core Metrics')
+plt.tight_layout()
+plt.show()
+```
+
+## ACL Event Window Analysis
+```{python}
+#| label: acl-analysis
+
+print("=== ACL EVENT WINDOW ANALYSIS ===")
+acl_phases = df['acl_phase'].value_counts()
+print("ACL Phase distribution:")
+print(acl_phases)
+
+print(f"\nACL window dates: {ACL_START} to {ACL_END}")
+print(f"Days in ACL window: {df['is_acl_window'].sum()}")
+
+# Check data availability around ACL event
+pre_data = df[df['acl_phase'] == 'pre']
+during_data = df[df['acl_phase'] == 'during']
+post_data = df[df['acl_phase'] == 'post']
+
+print(f"\nData availability:")
+print(f"Pre-ACL (30 days before): {len(pre_data)} days")
+print(f"During ACL: {len(during_data)} days")
+print(f"Post-ACL (30 days after): {len(post_data)} days")
+```
+
+# Sleep Stages vs Sleep Score Analysis
+
+This notebook analyzes the relationship between sleep stage percentages and sleep score, including correlation analysis and predictive modeling.
+
+## Sleep Stage Composition
+```{python}
+#| label: stage-composition
+
+# Calculate average sleep stage composition
+avg_composition = pd.DataFrame({
+    'Stage': ['REM', 'Deep', 'Light'],
+    'Percentage': [df['rem_sleep_pct'].mean(), 
+                   df['deep_sleep_pct'].mean(),
+                   df['light_sleep_pct'].mean()]
+})
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+# Pie chart
+colors = ['#ff9999', '#66b3ff', '#99ff99']
+ax1.pie(avg_composition['Percentage'], labels=avg_composition['Stage'], 
+        colors=colors, autopct='%1.1f%%', startangle=90)
+ax1.set_title('Average Sleep Stage Composition')
+
+# Distribution plots
+ax2.hist(df['rem_sleep_pct'].dropna(), bins=30, alpha=0.7, label='REM %', color='#ff9999')
+ax2.hist(df['deep_sleep_pct'].dropna(), bins=30, alpha=0.7, label='Deep %', color='#66b3ff')
+ax2.hist(df['light_sleep_pct'].dropna(), bins=30, alpha=0.7, label='Light %', color='#99ff99')
+ax2.set_xlabel('Percentage')
+ax2.set_ylabel('Frequency')
+ax2.set_title('Sleep Stage Percentage Distributions')
+ax2.legend()
+
+plt.tight_layout()
+plt.show()
+
+print(f"Average REM%: {df['rem_sleep_pct'].mean():.1f}%")
+print(f"Average Deep%: {df['deep_sleep_pct'].mean():.1f}%")
+print(f"Average Light%: {df['light_sleep_pct'].mean():.1f}%")
+```
+
+Light sleep dominates the majority of sleep, while REM (Rapid Eye Movement), the stage in which we, "which is a stage of sleep characterized by rapid eye movements behind the eyelids, active brain activity, and vivid dreams. It is one of two main types of sleep, the other being non-REM sleep. During REM sleep, the brain is almost as active as when you're awake, but your body experiences a temporary muscle paralysis". Deep sleep is similar at 21.73%, where we have physical restoration, tissue repair, immune system function, growth hormone release, and memory consolidation in this stage. It occurs in the first few hours of sleep, after stage 3 (deep sleep) and before REM sleep. The rest is made up of light sleep.
+
+## Correlation Analysis
+```{python}
+#| label: correlation-analysis
+
+print("=== CORRELATION ANALYSIS ===")
+
+# Calculate correlations
+def calculate_correlations(df, x_vars, y_var, method='pearson'):
+    results = []
+    for x in x_vars:
+        if method == 'pearson':
+            corr = df[x].corr(df[y_var])
+        else:
+            corr = df[x].corr(df[y_var], method='spearman')
+        results.append({'variable': x, 'correlation': corr})
+    return pd.DataFrame(results)
+
+# Pearson correlations
+pearson_corrs = calculate_correlations(df, stage_pct_cols, 'sleep_score', method='pearson')
+print("Pearson correlations with sleep score:")
+display(pearson_corrs.round(3))
+
+# Spearman correlations
+spearman_corrs = calculate_correlations(df, stage_pct_cols, 'sleep_score', method='spearman')
+print("\nSpearman correlations with sleep score:")
+display(spearman_corrs.round(3))
+
+# Partial correlations controlling for total sleep
+from sklearn.linear_model import LinearRegression
+
+def calculate_partial_correlation(df, x, y, control):
+    # Remove NaN values
+    clean_df = df[[x, y, control]].dropna()
+    
+    # Residualize x
+    X_control = clean_df[[control]]
+    x_model = LinearRegression().fit(X_control, clean_df[x])
+    x_resid = clean_df[x] - x_model.predict(X_control)
+    
+    # Residualize y
+    y_model = LinearRegression().fit(X_control, clean_df[y])
+    y_resid = clean_df[y] - y_model.predict(X_control)
+    
+    # Correlation of residuals
+    return np.corrcoef(x_resid, y_resid)[0, 1]
+
+partial_corrs = []
+for col in stage_pct_cols:
+    partial_r = calculate_partial_correlation(df, col, 'sleep_score', 'total_sleep_mins')
+    partial_corrs.append({'variable': col, 'partial_correlation': partial_r})
+
+partial_corrs_df = pd.DataFrame(partial_corrs)
+print("\nPartial correlations (controlling for total sleep duration):")
+display(partial_corrs_df.round(3))
+```
+
+Wow. So based on this data and the pearson correlation "a statistical measure that quantifies the linear relationship between two variables, ranging from -1 to +1." This shows that a **higher sleep scores are most strongly correlated with higher REM sleep percentage (r ≈ 0.57)**. After controlling for total sleep duration, REM and deep sleep both predict higher sleep quality, while light sleep percentage is negatively associated, suggesting that stage balance — not just total sleep time — is key to better sleep outcomes.
+
+## Model Fitting
+```{python}
+#| label: model-fitting
+
+print("=== MODEL FITTING ===")
+
+# Prepare data for modeling
+model_vars = stage_pct_cols + ['total_sleep_mins']
+model_df = df[model_vars + ['sleep_score']].dropna()
+X = model_df[model_vars]
+y = model_df['sleep_score']
+
+# OLS model
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
+
+ols_model = LinearRegression()
+ols_model.fit(X, y)
+ols_pred = ols_model.predict(X)
+ols_r2 = r2_score(y, ols_pred)
+
+ols_coefficients = pd.DataFrame({
+    'variable': model_vars,
+    'coefficient': ols_model.coef_,
+    'abs_coefficient': np.abs(ols_model.coef_)
+}).sort_values('abs_coefficient', ascending=False)
+
+print("OLS Model Results:")
+print(f"R-squared: {ols_r2:.3f}")
+print(f"Number of observations: {len(model_df)}")
+print("\nCoefficients:")
+display(ols_coefficients[['variable', 'coefficient']].round(3))
+
+# Ridge regression
+from sklearn.linear_model import Ridge
+
+ridge_model = Ridge(alpha=1.0)
+ridge_model.fit(X, y)
+ridge_pred = ridge_model.predict(X)
+ridge_r2 = r2_score(y, ridge_pred)
+
+ridge_coefficients = pd.DataFrame({
+    'variable': model_vars,
+    'coefficient': ridge_model.coef_,
+    'abs_coefficient': np.abs(ridge_model.coef_)
+}).sort_values('abs_coefficient', ascending=False)
+
+print(f"\nRidge Model Results:")
+print(f"R-squared: {ridge_r2:.3f}")
+print(f"Number of observations: {len(model_df)}")
+print("\nCoefficients:")
+display(ridge_coefficients[['variable', 'coefficient']].round(3))
+```
+
+The model explains about 81% of what drives my sleep score. REM % and total sleep minutes are the strongest independent predictors, with deep sleep helping modestly and light sleep hurting when controlling for the rest. The high R² reflects the combined predictive power of these factors, not just one strong correlation.
+
+## Sleep Stages vs Sleep Score Visualizations
+```{python}
+#| label: stage-scatter-plots
+#| fig-cap: "Relationship between sleep stages and sleep score with LOWESS smoothing"
+
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+# Define function for scatter with LOWESS
+def plot_scatter_with_lowess(x_data, y_data, title, ax):
+    # Remove NaN values
+    mask = ~(x_data.isna() | y_data.isna())
+    x_clean = x_data[mask]
+    y_clean = y_data[mask]
+    
+    # Scatter plot
+    ax.scatter(x_clean, y_clean, alpha=0.5, s=30)
+    
+    # Add LOWESS smoothing
+    if len(x_clean) > 10:
+        lowess_result = lowess(y_clean, x_clean, frac=0.3)
+        ax.plot(lowess_result[:, 0], lowess_result[:, 1], 'r-', linewidth=2, label='LOWESS')
+    
+    # Add linear regression line
+    z = np.polyfit(x_clean, y_clean, 1)
+    p = np.poly1d(z)
+    ax.plot(sorted(x_clean), p(sorted(x_clean)), 'g--', alpha=0.7, label='Linear')
+    
+    ax.set_xlabel(title.split(' vs ')[0])
+    ax.set_ylabel('Sleep Score')
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+# REM% vs Sleep Score
+plot_scatter_with_lowess(df['rem_sleep_pct'], df['sleep_score'], 
+                         'REM% vs Sleep Score', axes[0])
+
+# Deep% vs Sleep Score
+plot_scatter_with_lowess(df['deep_sleep_pct'], df['sleep_score'], 
+                         'Deep% vs Sleep Score', axes[1])
+
+# Light% vs Sleep Score
+plot_scatter_with_lowess(df['light_sleep_pct'], df['sleep_score'], 
+                         'Light% vs Sleep Score', axes[2])
+
+plt.tight_layout()
+plt.show()
+```
+
+These graphs show that sleep quality improves with a balanced distribution of stages (high REM (20–25%)), moderate deep (15–20%), and controlled light (<55%). The strong nonlinear rise in REM and sharp drop in light sleep indicate that stage balance matters more than total hours. The model's R² = 0.81 reflects how these three proportions, combined with total duration, jointly capture over 80% of what drives sleep score variation.
+
+## Coefficient Plot
+```{python}
+#| label: coefficient-plot
+#| fig-cap: "OLS model coefficients for sleep score prediction"
+
+if ols_coefficients.shape[0] > 0:
+    plt.figure(figsize=(10, 6))
+    
+    # Sort by coefficient value
+    coef_plot_df = ols_coefficients.sort_values('coefficient')
+    
+    # Create horizontal bar plot
+    colors = ['red' if x < 0 else 'green' for x in coef_plot_df['coefficient']]
+    plt.barh(range(len(coef_plot_df)), coef_plot_df['coefficient'], color=colors, alpha=0.7)
+    plt.yticks(range(len(coef_plot_df)), coef_plot_df['variable'])
+    plt.xlabel('Coefficient Value')
+    plt.title('OLS Model Coefficients (Sleep Score Prediction)')
+    plt.axvline(x=0, color='black', linestyle='-', linewidth=0.5)
+    plt.grid(axis='x', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+```
+
+# Weekday vs Weekend Sleep Duration Trends
+
+This notebook analyzes sleep patterns by day of the week and weekend vs weekday differences, including seasonal decomposition.
+
+## Weekday Distribution
+```{python}
+#| label: weekday-distribution
+
+print("=== WEEKDAY DISTRIBUTION ===")
+weekday_counts = df['weekday'].value_counts()
+display(weekday_counts)
+
+print(f"\nWeekend vs Weekday distribution:")
+print(f"Weekend days: {df['is_weekend'].sum()}")
+print(f"Weekday days: {(~df['is_weekend']).sum()}")
+```
+
+## Sleep Duration by Weekday
+```{python}
+#| label: sleep-by-weekday
+
+print("=== SLEEP DURATION BY WEEKDAY ===")
+weekday_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+weekday_sleep = df.groupby('weekday')['total_sleep_mins'].agg(['mean', 'std', 'count']).reindex(weekday_order).round(2)
+display(weekday_sleep)
+
+# Weekend vs weekday comparison
+print("\n=== WEEKEND VS WEEKDAY COMPARISON ===")
+weekend_sleep = df[df['is_weekend']]['total_sleep_mins']
+weekday_sleep_vals = df[~df['is_weekend']]['total_sleep_mins']
+
+print(f"Weekend sleep duration:")
+print(f"  Mean: {weekend_sleep.mean():.1f} minutes")
+print(f"  Std: {weekend_sleep.std():.1f} minutes")
+print(f"  Count: {len(weekend_sleep)} days")
+
+print(f"\nWeekday sleep duration:")
+print(f"  Mean: {weekday_sleep_vals.mean():.1f} minutes")
+print(f"  Std: {weekday_sleep_vals.std():.1f} minutes")
+print(f"  Count: {len(weekday_sleep_vals)} days")
+
+# Statistical test
+t_stat, p_value = stats.ttest_ind(weekend_sleep, weekday_sleep_vals)
+print(f"\nT-test results:")
+print(f"  T-statistic: {t_stat:.3f}")
+print(f"  P-value: {p_value:.3f}")
+print(f"  Difference: {weekend_sleep.mean() - weekday_sleep_vals.mean():.1f} minutes")
+```
+
+## Sleep Duration Visualizations
+```{python}
+#| label: weekday-visualizations
+#| fig-cap: "Sleep duration patterns by day of week"
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+# Box plot by weekday
+weekday_data = []
+for day in weekday_order:
+    day_data = df[df['weekday'] == day]['total_sleep_mins'].dropna()
+    weekday_data.append(day_data)
+
+bp = axes[0].boxplot(weekday_data, labels=[d[:3] for d in weekday_order], patch_artist=True)
+for i, box in enumerate(bp['boxes']):
+    if i >= 5:  # Weekend
+        box.set_facecolor('lightcoral')
+    else:  # Weekday
+        box.set_facecolor('lightblue')
+
+axes[0].set_ylabel('Sleep Duration (minutes)')
+axes[0].set_title('Sleep Duration by Weekday')
+axes[0].axhline(480, color='green', linestyle='--', alpha=0.5, label='8 hours')
+axes[0].legend()
+axes[0].grid(axis='y', alpha=0.3)
+
+# Weekend vs weekday comparison with confidence intervals
+def calculate_confidence_interval(data, confidence=0.95):
+    n = len(data)
+    mean = data.mean()
+    se = stats.sem(data.dropna())
+    margin = se * stats.t.ppf((1 + confidence) / 2, n - 1)
+    return mean - margin, mean + margin
+
+weekend_ci = calculate_confidence_interval(weekend_sleep)
+weekday_ci = calculate_confidence_interval(weekday_sleep_vals)
+
+comparison_data = pd.DataFrame({
+    'group': ['Weekday', 'Weekend'],
+    'mean': [weekday_sleep_vals.mean(), weekend_sleep.mean()],
+    'ci_low': [weekday_ci[0], weekend_ci[0]],
+    'ci_high': [weekday_ci[1], weekend_ci[1]]
+})
+
+x_pos = [0, 1]
+axes[1].bar(x_pos, comparison_data['mean'], color=['lightblue', 'lightcoral'], alpha=0.7)
+axes[1].errorbar(x_pos, comparison_data['mean'], 
+                 yerr=[comparison_data['mean'] - comparison_data['ci_low'],
+                       comparison_data['ci_high'] - comparison_data['mean']],
+                 fmt='none', color='black', capsize=5)
+
+axes[1].set_xticks(x_pos)
+axes[1].set_xticklabels(comparison_data['group'])
+axes[1].set_ylabel('Sleep Duration (minutes)')
+axes[1].set_title('Weekend vs Weekday Sleep Duration (95% CI)')
+axes[1].axhline(480, color='green', linestyle='--', alpha=0.5, label='8 hours')
+axes[1].legend()
+axes[1].grid(axis='y', alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+## STL Decomposition
+```{python}
+#| label: stl-decomposition
+#| fig-cap: "STL decomposition of total sleep duration"
+
+print("Testing STL decomposition...")
+
+# Prepare time series data
+df_ts = df.set_index('day').sort_index()
+sleep_series = df_ts['total_sleep_mins'].dropna()
+
+# Perform STL decomposition
+stl = STL(sleep_series, period=7, seasonal=13)
+stl_result = stl.fit()
+
+print("✅ STL decomposition completed!")
+print(f"Trend range: {stl_result.trend.min():.1f} - {stl_result.trend.max():.1f}")
+print(f"Seasonal range: {stl_result.seasonal.min():.1f} - {stl_result.seasonal.max():.1f}")
+
+# Plot STL decomposition
+fig, axes = plt.subplots(4, 1, figsize=(14, 10))
+
+# Original series
+axes[0].plot(sleep_series.index, sleep_series.values, 'b-', alpha=0.7)
+axes[0].set_ylabel('Original')
+axes[0].set_title('STL Decomposition of Total Sleep Duration')
+axes[0].grid(True, alpha=0.3)
+
+# Trend
+axes[1].plot(stl_result.trend.index, stl_result.trend.values, 'g-', linewidth=2)
+axes[1].set_ylabel('Trend')
+axes[1].grid(True, alpha=0.3)
+
+# Seasonal
+axes[2].plot(stl_result.seasonal.index, stl_result.seasonal.values, 'r-')
+axes[2].set_ylabel('Seasonal')
+axes[2].grid(True, alpha=0.3)
+
+# Residual
+axes[3].plot(stl_result.resid.index, stl_result.resid.values, 'm-', alpha=0.7)
+axes[3].set_ylabel('Residual')
+axes[3].set_xlabel('Date')
+axes[3].grid(True, alpha=0.3)
+
+for ax in axes[:-1]:
+    ax.set_xticklabels([])
+
+plt.tight_layout()
+plt.show()
+```
+
+The sleep duration follows a long-term rhythm: **shorter average sleep toward late 2024, peaking mid-2025, then declining again**. This is overlaid with strong short-term variability that suggests inconsistent nightly habits. I have what can be seen as cyclical "recovery" spikes but no fixed weekly periodicity. The STL results confirm my total sleep behavior is driven by mid-term lifestyle trends more than strict day-to-day regularity.
+
+# Activity to Sleep Lags & ACL Event Study
+
+This notebook analyzes the relationship between daily activity and sleep, including lag effects, and performs an event study around the ACL injury.
+
+## Lag Features Summary
+```{python}
+#| label: lag-features
+
+# Check lag features
+lag_cols = ['steps_lag0', 'steps_lag1', 'steps_lag2', 
+           'active_calories_lag0', 'active_calories_lag1', 'active_calories_lag2']
+
+print("=== LAG FEATURES SUMMARY ===")
+print("Lag features availability:")
+for col in lag_cols:
+    non_null_count = df[col].notna().sum()
+    print(f"  {col}: {non_null_count} observations")
+
+print(f"\nTotal observations: {len(df)}")
+print(f"Date range: {df['day'].min()} to {df['day'].max()}")
+```
+
+## Activity-Sleep Correlations
+```{python}
+#| label: activity-correlations
+
+print("=== ACTIVITY-SLEEP CORRELATIONS ===")
+
+# Same-night correlations
+same_night_corrs = []
+for activity in ['steps', 'active_calories']:
+    corr = df[activity].corr(df['total_sleep_mins'])
+    same_night_corrs.append({'activity': activity, 'lag': 'same_night', 'correlation': corr})
+
+# Next-night correlations
+next_night_corrs = []
+for activity in ['steps', 'active_calories']:
+    lag_col = f"{activity}_lag1"
+    corr = df[lag_col].corr(df['total_sleep_mins'])
+    next_night_corrs.append({'activity': activity, 'lag': 'next_night', 'correlation': corr})
+
+corr_df = pd.DataFrame(same_night_corrs + next_night_corrs)
+display(corr_df.round(3))
+```
+
+## Lag Model Fitting
+```{python}
+#| label: lag-models
+
+print("=== LAG MODEL FITTING ===")
+
+# Fit models with different lag structures
+lag_models = {}
+
+# Steps model
+steps_vars = ['steps_lag0', 'steps_lag1', 'steps_lag2']
+steps_df = df[steps_vars + ['total_sleep_mins']].dropna()
+if len(steps_df) > 0:
+    X_steps = steps_df[steps_vars]
+    y_steps = steps_df['total_sleep_mins']
+    
+    steps_model = LinearRegression()
+    steps_model.fit(X_steps, y_steps)
+    steps_r2 = steps_model.score(X_steps, y_steps)
+    
+    lag_models['steps'] = {
+        'r2': steps_r2,
+        'n_obs': len(steps_df),
+        'coefficients': pd.DataFrame({
+            'variable': steps_vars,
+            'coefficient': steps_model.coef_
+        })
+    }
+
+# Calories model
+cal_vars = ['active_calories_lag0', 'active_calories_lag1', 'active_calories_lag2']
+cal_df = df[cal_vars + ['total_sleep_mins']].dropna()
+if len(cal_df) > 0:
+    X_cal = cal_df[cal_vars]
+    y_cal = cal_df['total_sleep_mins']
+    
+    cal_model = LinearRegression()
+    cal_model.fit(X_cal, y_cal)
+    cal_r2 = cal_model.score(X_cal, y_cal)
+    
+    lag_models['active_calories'] = {
+        'r2': cal_r2,
+        'n_obs': len(cal_df),
+        'coefficients': pd.DataFrame({
+            'variable': cal_vars,
+            'coefficient': cal_model.coef_
+        })
+    }
+
+for model_name, results in lag_models.items():
+    print(f"\n{model_name.upper()} Model:")
+    print(f"  R-squared: {results['r2']:.3f}")
+    print(f"  Observations: {results['n_obs']}")
+    print("  Coefficients:")
+    display(results['coefficients'].round(3))
+```
+
+## Activity vs Sleep Scatter Plots
+```{python}
+#| label: activity-scatter
+#| fig-cap: "Relationship between activity and sleep with same-night and next-night effects"
+
+fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+
+def plot_activity_sleep(x_data, y_data, title, ax):
+    mask = ~(x_data.isna() | y_data.isna())
+    x_clean = x_data[mask]
+    y_clean = y_data[mask]
+    
+    if len(x_clean) > 0:
+        ax.scatter(x_clean, y_clean, alpha=0.5, s=30)
+        
+        if len(x_clean) > 10:
+            lowess_result = lowess(y_clean, x_clean, frac=0.3)
+            ax.plot(lowess_result[:, 0], lowess_result[:, 1], 'r-', linewidth=2, label='LOWESS')
+        
+        z = np.polyfit(x_clean, y_clean, 1)
+        p = np.poly1d(z)
+        ax.plot(sorted(x_clean), p(sorted(x_clean)), 'g--', alpha=0.7, label='Linear')
+        
+        ax.legend()
+    
+    ax.set_xlabel(title.split(' vs ')[0])
+    ax.set_ylabel('Total Sleep (mins)')
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+
+# Same-night effects
+plot_activity_sleep(df['steps'], df['total_sleep_mins'], 
+                   'Steps vs Sleep (Same Night)', axes[0, 0])
+plot_activity_sleep(df['active_calories'], df['total_sleep_mins'], 
+                   'Active Calories vs Sleep (Same Night)', axes[0, 1])
+
+# Next-night effects
+plot_activity_sleep(df['steps_lag1'], df['total_sleep_mins'], 
+                   'Steps vs Sleep (Next Night)', axes[1, 0])
+plot_activity_sleep(df['active_calories_lag1'], df['total_sleep_mins'], 
+                   'Active Calories vs Sleep (Next Night)', axes[1, 1])
+
+plt.tight_layout()
+plt.show()
+```
+
+## ACL Event Study
+```{python}
+#| label: acl-event-study
+
+print("=== ACL EVENT STUDY ===")
+
+# Create event slices
+event_slices_data = {
+    'pre': df[df['acl_phase'] == 'pre'],
+    'during': df[df['acl_phase'] == 'during'],
+    'post': df[df['acl_phase'] == 'post']
+}
+
+print("Event study periods:")
+for phase, phase_df in event_slices_data.items():
+    print(f"  {phase}: {len(phase_df)} days")
+    if len(phase_df) > 0:
+        print(f"    Date range: {phase_df['day'].min()} to {phase_df['day'].max()}")
+
+# Calculate statistics for each phase
+acl_metrics = ['sleep_score', 'total_sleep_mins', 'average_hrv', 'readiness_score', 'steps']
+comparison_stats = []
+
+for phase, phase_df in event_slices_data.items():
+    if len(phase_df) > 0:
+        for metric in acl_metrics:
+            if metric in phase_df.columns:
+                mean_val = phase_df[metric].mean()
+                se = stats.sem(phase_df[metric].dropna())
+                ci_margin = se * stats.t.ppf(0.975, len(phase_df) - 1)
+                comparison_stats.append({
+                    'phase': phase,
+                    'metric': metric,
+                    'mean': mean_val,
+                    'ci_low': mean_val - ci_margin,
+                    'ci_high': mean_val + ci_margin,
+                    'n_obs': len(phase_df)
+                })
+
+comparison_df = pd.DataFrame(comparison_stats)
+print("\nPhase comparison statistics:")
+display(comparison_df.round(2))
+```
+
+## ACL Timeline Visualization
+```{python}
+#| label: acl-timeline
+#| fig-cap: "Key metrics timeline with ACL injury window highlighted"
+
+fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+
+def plot_timeline_with_window(data, x_col, y_col, start_date, end_date, title, ax):
+    ax.plot(data[x_col], data[y_col], 'b-', alpha=0.7)
+    
+    # Highlight ACL window
+    ax.axvspan(start_date, end_date, alpha=0.2, color='red', label='ACL Window')
+    
+    # Add rolling average
+    data_sorted = data.sort_values(x_col)
+    rolling_avg = data_sorted[y_col].rolling(window=7, min_periods=1).mean()
+    ax.plot(data_sorted[x_col], rolling_avg, 'g-', linewidth=2, alpha=0.8, label='7-day avg')
+    
+    ax.set_xlabel('Date')
+    ax.set_ylabel(y_col.replace('_', ' ').title())
+    ax.set_title(title)
+    ax.legend()
+    ax.tick_params(axis='x', rotation=45)
+    ax.grid(True, alpha=0.3)
+
+# Sleep score timeline
+plot_timeline_with_window(df, 'day', 'sleep_score', ACL_START, ACL_END,
+                          'Sleep Score Timeline with ACL Window', axes[0, 0])
+
+# Total sleep timeline
+plot_timeline_with_window(df, 'day', 'total_sleep_mins', ACL_START, ACL_END,
+                          'Total Sleep Duration Timeline with ACL Window', axes[0, 1])
+
+# HRV timeline
+plot_timeline_with_window(df, 'day', 'average_hrv', ACL_START, ACL_END,
+                          'Average HRV Timeline with ACL Window', axes[1, 0])
+
+# Steps timeline
+plot_timeline_with_window(df, 'day', 'steps', ACL_START, ACL_END,
+                          'Daily Steps Timeline with ACL Window', axes[1, 1])
+
+plt.tight_layout()
+plt.show()
+```
+
+## Pre/During/Post ACL Comparison
+```{python}
+#| label: acl-comparison
+#| fig-cap: "Comparison of key metrics across ACL injury phases"
+
+fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+
+metrics_to_plot = ['sleep_score', 'total_sleep_mins', 'average_hrv', 'steps']
+
+for i, metric in enumerate(metrics_to_plot):
+    row, col = i // 2, i % 2
+    
+    # Filter data for this metric
+    metric_data = comparison_df[comparison_df['metric'] == metric]
+    
+    if len(metric_data) > 0:
+        phases = ['pre', 'during', 'post']
+        phase_labels = ['Pre-ACL', 'During ACL', 'Post-ACL']
+        colors = ['blue', 'red', 'green']
+        
+        means = []
+        errors = []
+        valid_phases = []
+        valid_colors = []
+        
+        for j, phase in enumerate(phases):
+            phase_data = metric_data[metric_data['phase'] == phase]
+            if len(phase_data) > 0:
+                mean_val = phase_data['mean'].iloc[0]
+                ci_low = phase_data['ci_low'].iloc[0]
+                ci_high = phase_data['ci_high'].iloc[0]
+                
+                means.append(mean_val)
+                errors.append([mean_val - ci_low, ci_high - mean_val])
+                valid_phases.append(phase_labels[j])
+                valid_colors.append(colors[j])
+        
+        if means:
+            x_pos = range(len(means))
+            bars = axes[row, col].bar(x_pos, means, color=valid_colors, alpha=0.7)
+            
+            # Add error bars
+            errors_array = np.array(errors).T
+            axes[row, col].errorbar(x_pos, means, yerr=errors_array, 
+                                   fmt='none', color='black', capsize=5)
+            
+            axes[row, col].set_xticks(x_pos)
+            axes[row, col].set_xticklabels(valid_phases)
+            axes[row, col].set_ylabel(metric.replace('_', ' ').title())
+            axes[row, col].set_title(f'{metric.replace("_", " ").title()} by ACL Phase')
+            axes[row, col].grid(axis='y', alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+## Summary
+
+This comprehensive analysis reveals key insights about sleep patterns, stage composition, and the impact of activity on sleep quality. The ACL injury event study shows measurable changes in sleep and recovery metrics during the injury period, with notable recovery patterns in the post-injury phase.

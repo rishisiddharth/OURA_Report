@@ -1,0 +1,298 @@
+---
+title: "Oura Sleep Analysis Report"
+format:
+  html:
+    toc: true
+    code-fold: true
+    theme: cosmo
+execute:
+  echo: false
+  warning: false
+  message: false
+jupyter: python3
+---
+```{python}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+
+# Load data
+data_path = Path("/Users/rishi/Desktop/OURA/oura_daily_clean.csv")
+df = pd.read_csv(data_path)
+df['day'] = pd.to_datetime(df['day'])
+
+# Set style
+plt.style.use('default')
+sns.set_palette("husl")
+```
+
+# Sleep Analysis Report
+
+## Data Overview
+- **Total days**: `{python} len(df)`
+- **Date range**: `{python} df['day'].min().strftime('%Y-%m-%d')` to `{python} df['day'].max().strftime('%Y-%m-%d')`
+- **Average sleep**: `{python} f"{(df['total_sleep_mins'].mean()/60):.1f} hours"`
+- **Average HRV**: `{python} f"{df['average_hrv'].mean():.0f} ms"`
+
+## Sleep Score Analysis
+```{python}
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+# Distribution
+axes[0,0].hist(df['sleep_score'].dropna(), bins=30, edgecolor='black', alpha=0.7)
+axes[0,0].axvline(df['sleep_score'].mean(), color='red', linestyle='--', label=f'Mean: {df["sleep_score"].mean():.0f}')
+axes[0,0].axvline(df['sleep_score'].median(), color='blue', linestyle='--', label=f'Median: {df["sleep_score"].median():.0f}')
+axes[0,0].set_xlabel('Sleep Score')
+axes[0,0].set_ylabel('Frequency')
+axes[0,0].set_title('Sleep Score Distribution')
+axes[0,0].legend()
+
+# Time series
+axes[0,1].plot(df['day'], df['sleep_score'], alpha=0.3, label='Daily')
+axes[0,1].plot(df['day'], df['sleep_score'].rolling(7).mean(), label='7-day avg', linewidth=2)
+axes[0,1].plot(df['day'], df['sleep_score'].rolling(30).mean(), label='30-day avg', linewidth=2, color='red')
+axes[0,1].set_xlabel('Date')
+axes[0,1].set_ylabel('Sleep Score')
+axes[0,1].set_title('Sleep Score Over Time')
+axes[0,1].legend()
+axes[0,1].tick_params(axis='x', rotation=45)
+
+# Monthly averages
+monthly = df.groupby(df['day'].dt.to_period('M'))['sleep_score'].mean()
+axes[1,0].bar(range(len(monthly)), monthly.values)
+axes[1,0].set_xticks(range(len(monthly)))
+axes[1,0].set_xticklabels([str(m) for m in monthly.index], rotation=45)
+axes[1,0].set_ylabel('Average Sleep Score')
+axes[1,0].set_title('Monthly Average Sleep Score')
+axes[1,0].axhline(df['sleep_score'].mean(), color='red', linestyle='--', alpha=0.5)
+
+# Day of week
+df['weekday'] = df['day'].dt.day_name()
+weekday_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+weekday_scores = df.groupby('weekday')['sleep_score'].mean().reindex(weekday_order)
+axes[1,1].bar(range(7), weekday_scores.values, color=['skyblue']*5 + ['lightcoral']*2)
+axes[1,1].set_xticks(range(7))
+axes[1,1].set_xticklabels([d[:3] for d in weekday_order])
+axes[1,1].set_ylabel('Average Sleep Score')
+axes[1,1].set_title('Sleep Score by Day of Week')
+axes[1,1].axhline(df['sleep_score'].mean(), color='red', linestyle='--', alpha=0.5)
+
+plt.tight_layout()
+plt.show()
+```
+
+## Key Metrics Summary
+```{python}
+from IPython.display import display, HTML
+
+metrics = ['sleep_score', 'readiness_score', 'activity_score', 'average_hrv', 'steps', 'total_sleep_mins']
+available_metrics = [m for m in metrics if m in df.columns]
+
+summary = df[available_metrics].describe().round(1)
+display(HTML("<h3>Statistical Summary</h3>"))
+display(HTML(summary.T[['mean', 'std', 'min', '25%', '50%', '75%', 'max']].to_html()))
+
+# Recent vs all-time comparison
+recent_30 = df.nlargest(30, 'day')
+comparison = pd.DataFrame({
+    'All Time': df[available_metrics].mean(),
+    'Last 30 Days': recent_30[available_metrics].mean(),
+    'Change': recent_30[available_metrics].mean() - df[available_metrics].mean()
+}).round(1)
+
+display(HTML("<h3>Recent Performance (Last 30 Days vs All Time)</h3>"))
+display(HTML(comparison.to_html()))
+```
+
+## Sleep Duration Analysis
+```{python}
+if 'total_sleep_mins' in df.columns:
+    df['sleep_hours'] = df['total_sleep_mins'] / 60
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # Distribution
+    axes[0,0].hist(df['sleep_hours'].dropna(), bins=30, edgecolor='black', alpha=0.7)
+    axes[0,0].axvline(7, color='red', linestyle='--', label='7 hours', linewidth=2)
+    axes[0,0].axvline(8, color='green', linestyle='--', label='8 hours', linewidth=2)
+    axes[0,0].axvline(df['sleep_hours'].mean(), color='blue', linestyle='-', label=f'Your avg: {df["sleep_hours"].mean():.1f}h')
+    axes[0,0].set_xlabel('Sleep Hours')
+    axes[0,0].set_ylabel('Frequency')
+    axes[0,0].set_title('Sleep Duration Distribution')
+    axes[0,0].legend()
+    
+    # Time series
+    axes[0,1].plot(df['day'], df['sleep_hours'], alpha=0.3, label='Daily')
+    axes[0,1].plot(df['day'], df['sleep_hours'].rolling(7).mean(), label='7-day avg', linewidth=2)
+    axes[0,1].fill_between(df['day'], 7, 9, alpha=0.2, color='green', label='Recommended range')
+    axes[0,1].set_xlabel('Date')
+    axes[0,1].set_ylabel('Hours')
+    axes[0,1].set_title('Sleep Duration Over Time')
+    axes[0,1].legend()
+    axes[0,1].tick_params(axis='x', rotation=45)
+    
+    # Weekday vs Weekend
+    df['is_weekend'] = df['day'].dt.dayofweek.isin([5, 6])
+    weekend_sleep = df[df['is_weekend']]['sleep_hours'].dropna()
+    weekday_sleep = df[~df['is_weekend']]['sleep_hours'].dropna()
+    
+    axes[1,0].boxplot([weekday_sleep, weekend_sleep], labels=['Weekday', 'Weekend'])
+    axes[1,0].set_ylabel('Hours of Sleep')
+    axes[1,0].set_title('Weekday vs Weekend Sleep')
+    axes[1,0].axhline(8, color='green', linestyle='--', alpha=0.5)
+    axes[1,0].grid(axis='y', alpha=0.3)
+    
+    # Sleep debt calculation
+    ideal_sleep = 8
+    df['sleep_debt'] = ideal_sleep - df['sleep_hours']
+    df['cumulative_debt'] = df['sleep_debt'].cumsum()
+    
+    axes[1,1].plot(df['day'], df['cumulative_debt'])
+    axes[1,1].fill_between(df['day'], 0, df['cumulative_debt'], 
+                           where=(df['cumulative_debt'] > 0), color='red', alpha=0.3, label='Sleep debt')
+    axes[1,1].fill_between(df['day'], 0, df['cumulative_debt'], 
+                           where=(df['cumulative_debt'] <= 0), color='green', alpha=0.3, label='Sleep surplus')
+    axes[1,1].set_xlabel('Date')
+    axes[1,1].set_ylabel('Cumulative Hours')
+    axes[1,1].set_title('Cumulative Sleep Debt (vs 8h/night)')
+    axes[1,1].legend()
+    axes[1,1].tick_params(axis='x', rotation=45)
+    axes[1,1].grid(axis='y', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    print(f"Average weekday sleep: {weekday_sleep.mean():.1f} hours")
+    print(f"Average weekend sleep: {weekend_sleep.mean():.1f} hours")
+    print(f"Weekend sleep bonus: {weekend_sleep.mean() - weekday_sleep.mean():.1f} hours")
+```
+
+## HRV Analysis
+```{python}
+if 'average_hrv' in df.columns:
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # Distribution
+    axes[0,0].hist(df['average_hrv'].dropna(), bins=30, edgecolor='black', alpha=0.7)
+    axes[0,0].axvline(df['average_hrv'].mean(), color='red', linestyle='--', label=f'Mean: {df["average_hrv"].mean():.0f}')
+    axes[0,0].axvline(df['average_hrv'].median(), color='blue', linestyle='--', label=f'Median: {df["average_hrv"].median():.0f}')
+    axes[0,0].set_xlabel('HRV (ms)')
+    axes[0,0].set_ylabel('Frequency')
+    axes[0,0].set_title('HRV Distribution')
+    axes[0,0].legend()
+    
+    # Time series
+    axes[0,1].plot(df['day'], df['average_hrv'], alpha=0.3, label='Daily')
+    axes[0,1].plot(df['day'], df['average_hrv'].rolling(7).mean(), label='7-day avg', linewidth=2)
+    axes[0,1].plot(df['day'], df['average_hrv'].rolling(30).mean(), label='30-day avg', linewidth=2, color='red')
+    axes[0,1].set_xlabel('Date')
+    axes[0,1].set_ylabel('HRV (ms)')
+    axes[0,1].set_title('HRV Trend Over Time')
+    axes[0,1].legend()
+    axes[0,1].tick_params(axis='x', rotation=45)
+    
+    # HRV vs Sleep Score
+    mask = ~(df['average_hrv'].isna() | df['sleep_score'].isna())
+    axes[1,0].scatter(df.loc[mask, 'average_hrv'], df.loc[mask, 'sleep_score'], alpha=0.5)
+    z = np.polyfit(df.loc[mask, 'average_hrv'], df.loc[mask, 'sleep_score'], 1)
+    p = np.poly1d(z)
+    x_trend = np.linspace(df['average_hrv'].min(), df['average_hrv'].max(), 100)
+    axes[1,0].plot(x_trend, p(x_trend), "r--", alpha=0.8, label='Trend')
+    axes[1,0].set_xlabel('HRV (ms)')
+    axes[1,0].set_ylabel('Sleep Score')
+    axes[1,0].set_title('HRV vs Sleep Score')
+    axes[1,0].legend()
+    axes[1,0].grid(alpha=0.3)
+    
+    # HRV vs Heart Rate
+    if 'average_heart_rate' in df.columns:
+        mask = ~(df['average_hrv'].isna() | df['average_heart_rate'].isna())
+        axes[1,1].scatter(df.loc[mask, 'average_heart_rate'], df.loc[mask, 'average_hrv'], alpha=0.5)
+        axes[1,1].set_xlabel('Average Heart Rate (bpm)')
+        axes[1,1].set_ylabel('HRV (ms)')
+        axes[1,1].set_title('Heart Rate vs HRV')
+        axes[1,1].grid(alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+```
+
+## Activity Analysis
+```{python}
+if 'steps' in df.columns and 'activity_score' in df.columns:
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # Steps distribution
+    axes[0,0].hist(df['steps'].dropna(), bins=30, edgecolor='black', alpha=0.7)
+    axes[0,0].axvline(10000, color='green', linestyle='--', label='10k goal', linewidth=2)
+    axes[0,0].axvline(df['steps'].mean(), color='blue', linestyle='-', label=f'Your avg: {df["steps"].mean():.0f}')
+    axes[0,0].set_xlabel('Daily Steps')
+    axes[0,0].set_ylabel('Frequency')
+    axes[0,0].set_title('Steps Distribution')
+    axes[0,0].legend()
+    
+    # Steps over time
+    axes[0,1].plot(df['day'], df['steps'], alpha=0.3, label='Daily')
+    axes[0,1].plot(df['day'], df['steps'].rolling(7).mean(), label='7-day avg', linewidth=2)
+    axes[0,1].axhline(10000, color='green', linestyle='--', alpha=0.5)
+    axes[0,1].set_xlabel('Date')
+    axes[0,1].set_ylabel('Steps')
+    axes[0,1].set_title('Daily Steps Over Time')
+    axes[0,1].legend()
+    axes[0,1].tick_params(axis='x', rotation=45)
+    
+    # Activity vs Sleep
+    mask = ~(df['activity_score'].isna() | df['sleep_score'].isna())
+    axes[1,0].scatter(df.loc[mask, 'activity_score'], df.loc[mask, 'sleep_score'], alpha=0.5)
+    axes[1,0].set_xlabel('Activity Score')
+    axes[1,0].set_ylabel('Sleep Score')
+    axes[1,0].set_title('Activity vs Sleep Quality')
+    axes[1,0].grid(alpha=0.3)
+    
+    # Activity vs Readiness
+    if 'readiness_score' in df.columns:
+        mask = ~(df['activity_score'].isna() | df['readiness_score'].isna())
+        axes[1,1].scatter(df.loc[mask, 'activity_score'], df.loc[mask, 'readiness_score'], alpha=0.5)
+        axes[1,1].set_xlabel('Activity Score')
+        axes[1,1].set_ylabel('Readiness Score')
+        axes[1,1].set_title('Activity vs Readiness')
+        axes[1,1].grid(alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    print(f"Days meeting 10k steps: {(df['steps'] >= 10000).sum()} out of {df['steps'].notna().sum()} ({(df['steps'] >= 10000).mean()*100:.1f}%)")
+```
+
+## Correlation Analysis
+```{python}
+# Select key metrics for correlation
+corr_cols = ['sleep_score', 'readiness_score', 'activity_score', 'total_sleep_mins', 
+             'deep_sleep_mins', 'rem_sleep_mins', 'light_sleep_mins',
+             'average_hrv', 'average_heart_rate', 'steps', 'active_calories']
+corr_cols = [col for col in corr_cols if col in df.columns]
+
+if len(corr_cols) > 3:
+    corr_matrix = df[corr_cols].corr()
+    
+    plt.figure(figsize=(10, 8))
+    mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
+    sns.heatmap(corr_matrix, mask=mask, annot=True, fmt='.2f', 
+                cmap='coolwarm', center=0, vmin=-1, vmax=1, 
+                square=True, linewidths=1)
+    plt.title('Correlation Matrix of Key Metrics')
+    plt.tight_layout()
+    plt.show()
+```
+
+## Insights Summary
+```{python}
+print(f"📊 **Key Statistics:**")
+print(f"- Average sleep: {df['total_sleep_mins'].mean()/60:.1f} hours per night")
+print(f"- Average sleep score: {df['sleep_score'].mean():.0f}")
+print(f"- Average HRV: {df['average_hrv'].mean():.0f} ms")
+print(f"- Average daily steps: {df['steps'].mean():.0f}")
+print(f"- Total days tracked: {len(df)}")
+```ENDOFFILE
