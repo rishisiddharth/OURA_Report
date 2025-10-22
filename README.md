@@ -1,8 +1,8 @@
 # OURA_Report
-This is my health data from ring I wear, OURA. It tracks heart rate, metrics in sleep, and an activity score, made up of steps etc)>
+This is my health data from ring I wear, OURA. It tracks heart rate, metrics in sleep, and an activity score, made up of steps etc). It provides simple analysis and I was able to build a story with the data to backup some of the results 
 
 ## View Report
-[View the HTML Report](report.html)
+[VIEW the HTML Report]((https://htmlpreview.github.io/?https://github.com/Rsiddharth54/OURA_Report/blob/main/report_complete.html))
 
 
 
