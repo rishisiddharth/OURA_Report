@@ -2,7 +2,7 @@
 This Project consists of my health data from my Oura ring. This was during when I tore my ACL, so we can see the metrics, before and after surgery and map out the discrepancies. 
 
 ## View Report
-[**View the Report**](https://htmlpreview.github.io/?https://github.com/rishisiddharth/OURA_Report/blob/main/report_complete.html)
+[**View the Full Report**](https://rishisiddharth.github.io/OURA_Report/report_complete.html)
 
 
 
